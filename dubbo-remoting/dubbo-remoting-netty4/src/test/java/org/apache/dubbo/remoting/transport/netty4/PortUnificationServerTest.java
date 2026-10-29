@@ -21,17 +21,66 @@ import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.common.utils.NetUtils;
 import org.apache.dubbo.config.ApplicationConfig;
 import org.apache.dubbo.config.context.ConfigManager;
+import org.apache.dubbo.remoting.Channel;
 import org.apache.dubbo.remoting.api.pu.DefaultPuHandler;
+import org.apache.dubbo.remoting.transport.ChannelHandlerAdapter;
 import org.apache.dubbo.rpc.model.ApplicationModel;
+import org.apache.dubbo.rpc.model.FrameworkModel;
 import org.apache.dubbo.rpc.model.ModuleModel;
 
+import java.net.Socket;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+import io.netty.channel.ChannelOption;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.apache.dubbo.common.constants.CommonConstants.EXECUTOR_MANAGEMENT_MODE_DEFAULT;
 import static org.apache.dubbo.common.constants.CommonConstants.EXT_PROTOCOL;
+import static org.apache.dubbo.common.constants.CommonConstants.KEEP_ALIVE_KEY;
 
 class PortUnificationServerTest {
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(booleans = {false, true})
+    void testAcceptedChannelKeepAlive(Boolean keepAlive) throws Throwable {
+        FrameworkModel frameworkModel = new FrameworkModel();
+        NettyPortUnificationServer server = null;
+        try {
+            ApplicationModel applicationModel = frameworkModel.newApplication();
+            applicationModel.getApplicationConfigManager().setApplication(new ApplicationConfig("provider-app"));
+            URL url = URL.valueOf("empty://127.0.0.1:" + NetUtils.getAvailablePort())
+                    .setScopeModel(applicationModel.getDefaultModule());
+            if (keepAlive != null) {
+                url = url.addParameter(KEEP_ALIVE_KEY, keepAlive);
+            }
+            CompletableFuture<Channel> accepted = new CompletableFuture<>();
+            server = new NettyPortUnificationServer(url, new ChannelHandlerAdapter() {
+                @Override
+                public void connected(Channel channel) {
+                    accepted.complete(channel);
+                }
+            });
+            server.bind();
+            try (Socket socket = new Socket()) {
+                socket.connect(server.getLocalAddress(), 5000);
+                NettyChannel channel = (NettyChannel) accepted.get(5, TimeUnit.SECONDS);
+                Assertions.assertEquals(
+                        Boolean.TRUE.equals(keepAlive),
+                        channel.getNioChannel().config().getOption(ChannelOption.SO_KEEPALIVE));
+            }
+        } finally {
+            if (server != null) {
+                server.close();
+            }
+            frameworkModel.destroy();
+        }
+    }
 
     @Test
     void testBind() throws Throwable {
